@@ -1,0 +1,140 @@
+#include "Secret.h"
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include "WiFi.h"
+#include "time.h"
+#include "DHT.h"
+
+#define DHTPIN 4 // Digital pin connected to the DHT sensor
+#define DHTTYPE DHT11 // DHT 11
+#define LEDPIN 2 // Digital pin connected to the LED
+
+#define AWS_IOT_PUBLISH_TOPIC "dht11/pub"
+#define AWS_IOT_SUBSCRIBE_TOPIC "dht11/sub"
+
+float h;
+float t;
+const float threshold = 25.0; // Temperature threshold in °C
+
+DHT dht(DHTPIN, DHTTYPE);
+
+WiFiClientSecure net = WiFiClientSecure();
+PubSubClient client(net);
+
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 19800; // IST is UTC+5:30, so 5*3600 + 30*60 = 19800
+const int daylightOffset_sec = 0; // No daylight saving time in India
+
+void connectAWS() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.println("Connecting to Wi-Fi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  // Configure WiFiClientSecure to use the AWS IoT device credentials
+  net.setCACert(AWS_CERT_CA);
+  net.setCertificate(AWS_CERT_CRT);
+  net.setPrivateKey(AWS_CERT_PRIVATE);
+
+  // Connect to the MQTT broker on the AWS endpoint we defined earlier
+  client.setServer(AWS_IOT_ENDPOINT, 8883);
+
+  // Create a message handler
+  client.setCallback(messageHandler);
+
+  Serial.println("Connecting to AWS IOT");
+
+  while (!client.connect(THINGNAME)) {
+    Serial.print(".");
+    delay(100);
+  }
+
+  if (!client.connected()) {
+    Serial.println("AWS IoT Timeout!");
+    return;
+  }
+
+  // Subscribe to a topic
+  client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
+
+  Serial.println("AWS IoT Connected!");
+}
+
+void publishMessage() {
+  // Get the current timestamp
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
+  }
+
+  char timeStamp[25];
+  strftime(timeStamp, sizeof(timeStamp), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  // Create the JSON message
+  StaticJsonDocument<200> doc;
+  doc["humidity"] = h;
+  doc["temperature"] = t;
+  doc["timestamp"] = timeStamp;
+
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer); // Serialize JSON to buffer
+
+  client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
+}
+
+void messageHandler(char* topic, byte* payload, unsigned int length) {
+  Serial.print("incoming: ");
+  Serial.println(topic);
+
+  StaticJsonDocument<200> doc;
+  deserializeJson(doc, payload);
+  const char* message = doc["message"];
+  Serial.println(message);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LEDPIN, OUTPUT);
+  connectAWS();
+  dht.begin();
+
+  // Initialize time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+}
+
+void loop() {
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) { // Check if any reads failed and    exit early (to try again).
+    Serial.println(F("Failed to read from DHT sensor!"));
+    return;
+  }
+
+  Serial.print(F("Humidity: "));
+  Serial.print(h);
+  Serial.print(F("% Temperature: "));
+  Serial.print(t);
+  Serial.println(F("°C"));
+
+  // Blink LED if temperature exceeds threshold
+  if (t > threshold) {
+    digitalWrite(LEDPIN, HIGH); // Turn the LED on
+    delay(500); // Wait for 500 milliseconds
+    digitalWrite(LEDPIN, LOW); // Turn the LED off
+    delay(500); // Wait for 500 milliseconds
+  } else {
+    digitalWrite(LEDPIN, LOW); // Ensure the LED is off
+  }
+
+  publishMessage();
+  client.loop();
+  delay(5000);
+}  
